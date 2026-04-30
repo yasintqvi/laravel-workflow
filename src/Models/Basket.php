@@ -2,7 +2,6 @@
 
 namespace Maestrodimateo\Workflow\Models;
 
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
@@ -10,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Maestrodimateo\Workflow\Traits\HasRoles;
 
 /**
  * @property-read string $id
@@ -25,7 +25,7 @@ use Illuminate\Database\Eloquent\Relations\MorphToMany;
  */
 class Basket extends Model
 {
-    use HasUuids;
+    use HasRoles, HasUuids;
 
     protected $fillable = [
         'name',
@@ -99,31 +99,4 @@ class Basket extends Model
         return $this->morphedByMany($this->circuit->targetModel, 'statusable', 'statusable');
     }
 
-    /**
-     * Check if a role name is allowed for this basket.
-     */
-    public function hasRole(string $role): bool
-    {
-        return in_array($role, $this->roles ?? [], true);
-    }
-
-    /**
-     * Scope : paniers accessibles pour un rôle donné.
-     */
-    public function scopeForRole(Builder $query, string $role): Builder
-    {
-        return $query->whereJsonContains('roles', $role);
-    }
-
-    /**
-     * Scope : paniers accessibles pour au moins un des rôles donnés.
-     */
-    public function scopeForRoles(Builder $query, array $roles): Builder
-    {
-        return $query->where(function (Builder $q) use ($roles) {
-            foreach ($roles as $role) {
-                $q->orWhereJsonContains('roles', $role);
-            }
-        });
-    }
 }

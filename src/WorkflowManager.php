@@ -61,10 +61,6 @@ class WorkflowManager
 
     /**
      * Scope all operations to a specific circuit.
-     * Required when the model is targeted by multiple circuits.
-     *
-     *     Workflow::for($invoice)->in($circuitId)->currentStatus();
-     *     Workflow::for($invoice)->in($circuit)->transition($basketId);
      *
      * @param  string|Circuit  $circuit  Circuit ID or Circuit instance
      */
@@ -82,18 +78,10 @@ class WorkflowManager
 
     /**
      * Get the current basket of the model.
-     * If a circuit is set via in(), returns the status in that circuit only.
      */
     public function currentStatus(): ?Basket
     {
-        if ($this->circuitId) {
-            return $this->subject->baskets()
-                ->where('circuit_id', $this->circuitId)
-                ->orderByPivot('created_at', 'desc')
-                ->first();
-        }
-
-        return $this->subject->baskets->last();
+        return $this->subject->currentStatus($this->circuitId);
     }
 
     /**
@@ -136,14 +124,6 @@ class WorkflowManager
 
     /**
      * Transition multiple models to the same basket using chunked bulk SQL.
-     *
-     * Models are processed in chunks of $chunkSize (default 1000) for
-     * consistent memory usage regardless of total count.
-     * Transition actions are NOT executed in bulk mode (they need per-model context).
-     *
-     *     $result = Workflow::transitionMany($invoices, $basketId, 'Batch approved');
-     *     $result['transitioned']; // 8
-     *     $result['skipped'];      // [['id' => '...', 'reason' => '...']]
      *
      * @param  iterable<Model>  $models  Collection or array of models
      * @param  string  $nextBasketId  Target basket UUID
@@ -193,9 +173,8 @@ class WorkflowManager
 
     /**
      * Process a single chunk of model IDs for bulk transition.
-     * ~6 queries per chunk regardless of chunk size.
      */
-    private function transitionChunk(
+    protected function transitionChunk(
         array $modelIds,
         string $modelType,
         Basket $nextBasket,
@@ -275,9 +254,13 @@ class WorkflowManager
             ->selectRaw('historable_id, MAX(created_at) as last_at')
             ->pluck('last_at', 'historable_id');
 
-        $creationDates = DB::table((new $modelType)->getTable())
-            ->whereIn('id', $eligibleIds)
-            ->pluck('created_at', 'id');
+        // Only query creation dates for models without history
+        $missingIds = array_diff($eligibleIds, $lastDates->keys()->all());
+        $creationDates = empty($missingIds)
+            ? collect()
+            : DB::table((new $modelType)->getTable())
+                ->whereIn('id', $missingIds)
+                ->pluck('created_at', 'id');
 
         DB::table('histories')->insert(
             array_map(function ($id) use ($eligible, $previousStatuses, $nextBasket, $comment, $currentUserId, $now, $lastDates, $creationDates, $modelType) {
@@ -308,14 +291,9 @@ class WorkflowManager
         return ['transitioned' => count($eligibleIds), 'skipped' => $skipped];
     }
 
-    private function executeTransitionActions(Basket $from, Basket $to): void
+    protected function executeTransitionActions(Basket $from, Basket $to): void
     {
-        $pivot = $from->next()->where('to_basket_id', $to->id)->first()?->pivot;
-        $actions = json_decode($pivot?->actions ?? '[]', true);
-
-        if (! is_array($actions)) {
-            return;
-        }
+        $actions = $this->decodeTransitionActions($from, $to);
 
         foreach ($actions as $actionConfig) {
             $key = $actionConfig['type'] ?? null;
@@ -327,13 +305,26 @@ class WorkflowManager
         }
     }
 
+    /**
+     * Decode the actions JSON from the transition pivot between two baskets.
+     *
+     * @return array<int, array{type: string, config: array}>
+     */
+    protected function decodeTransitionActions(Basket $from, Basket $to): array
+    {
+        $pivot = $from->next()->where('to_basket_id', $to->id)->first()?->pivot;
+
+        $actions = json_decode($pivot?->actions ?? '[]', true, 512, JSON_THROW_ON_ERROR);
+
+        return is_array($actions) ? $actions : [];
+    }
+
     // -------------------------------------------------------------------------
     // Resource locking
     // -------------------------------------------------------------------------
 
     /**
      * Lock the model so no other user can transition it.
-     * The lock auto-expires after the configured duration.
      *
      * @param  int|null  $minutes  Lock duration (null = use config default)
      * @return WorkflowLock The created lock
@@ -362,15 +353,18 @@ class WorkflowManager
         }
 
         // Create new lock
-        return $this->subject->workflowLock()->create([
+        $lock = $this->subject->workflowLock()->create([
             'locked_by' => $currentUserId,
             'expires_at' => now()->addMinutes($minutes ?? config('workflow.lock.duration_minutes', 30)),
         ]);
+
+        $this->subject->unsetRelation('workflowLock');
+
+        return $lock;
     }
 
     /**
      * Release the lock on the model.
-     * Only the lock owner or a force unlock can release it.
      */
     public function unlock(bool $force = false): void
     {
@@ -381,23 +375,18 @@ class WorkflowManager
         }
 
         if (! $force && $lock->locked_by !== $this->currentUserId()) {
-            return; // Can't unlock someone else's lock without force
+            return;
         }
 
         $lock->delete();
+        $this->subject->unsetRelation('workflowLock');
     }
 
-    /**
-     * Check if the model is currently locked.
-     */
     public function isLocked(): bool
     {
         return $this->getActiveLock() !== null;
     }
 
-    /**
-     * Check if the model is locked by the current user.
-     */
     public function isLockedByMe(): bool
     {
         $lock = $this->getActiveLock();
@@ -405,17 +394,11 @@ class WorkflowManager
         return $lock && $lock->locked_by === $this->currentUserId();
     }
 
-    /**
-     * Get the user ID that holds the lock, or null.
-     */
     public function lockedBy(): ?string
     {
         return $this->getActiveLock()?->locked_by;
     }
 
-    /**
-     * Get the lock expiration time, or null.
-     */
     public function lockExpiration(): ?Carbon
     {
         return $this->getActiveLock()?->expires_at;
@@ -424,10 +407,12 @@ class WorkflowManager
     /**
      * Get the active (non-expired) lock for the model.
      */
-    private function getActiveLock(): ?WorkflowLock
+    protected function getActiveLock(): ?WorkflowLock
     {
-        // Always reload to avoid stale cache after lock/unlock
-        $this->subject->load('workflowLock');
+        if (! $this->subject->relationLoaded('workflowLock')) {
+            $this->subject->load('workflowLock');
+        }
+
         $lock = $this->subject->workflowLock;
 
         if (! $lock || ! $lock->isActive()) {
@@ -437,11 +422,9 @@ class WorkflowManager
         return $lock;
     }
 
-    /**
-     * Delete expired locks for the model.
-     */
-    private function cleanExpiredLock(): void
+    protected function cleanExpiredLock(): void
     {
+        $this->subject->load('workflowLock');
         $lock = $this->subject->workflowLock;
 
         if ($lock && ! $lock->isActive()) {
@@ -450,11 +433,9 @@ class WorkflowManager
         }
     }
 
-    /**
-     * Throw if the model is locked by another user.
-     */
-    private function guardAgainstLock(): void
+    protected function guardAgainstLock(): void
     {
+        $this->subject->load('workflowLock');
         $lock = $this->getActiveLock();
 
         if ($lock && $lock->locked_by !== $this->currentUserId()) {
@@ -465,7 +446,7 @@ class WorkflowManager
     /**
      * Get the current authenticated user identifier.
      */
-    private function currentUserId(): string
+    protected function currentUserId(): string
     {
         return (string) (auth()->user()?->{config('workflow.auth_identifier', 'id')} ?? 'system');
     }
@@ -484,16 +465,7 @@ class WorkflowManager
             return [];
         }
 
-        $next = $current->next()->where('to_basket_id', $nextBasketId)->first();
-        if (! $next) {
-            return [];
-        }
-
-        $actions = json_decode($next->pivot->actions ?? '[]', true);
-
-        if (! is_array($actions)) {
-            return [];
-        }
+        $actions = $this->decodeTransitionActions($current, Basket::find($nextBasketId));
 
         return collect($actions)
             ->where('type', 'require_document')
@@ -512,11 +484,13 @@ class WorkflowManager
             return [];
         }
 
-        return $current->next()->get()->map(function (Basket $next) {
-            $actions = json_decode($next->pivot->actions ?? '[]', true);
-            $docs = is_array($actions)
-                ? collect($actions)->where('type', 'require_document')->flatMap(fn ($a) => $a['config']['documents'] ?? [])->values()->all()
-                : [];
+        return $current->next()->get()->map(function (Basket $next) use ($current) {
+            $actions = $this->decodeTransitionActions($current, $next);
+            $docs = collect($actions)
+                ->where('type', 'require_document')
+                ->flatMap(fn ($a) => $a['config']['documents'] ?? [])
+                ->values()
+                ->all();
 
             return [
                 'basket' => $next,
@@ -530,20 +504,13 @@ class WorkflowManager
     // History & duration
     // -------------------------------------------------------------------------
 
-    /**
-     * Get history, optionally filtered by circuit.
-     */
     public function history(): Collection
     {
         $query = $this->subject->histories()->latest();
 
         if ($this->circuitId) {
-            $basketIds = Basket::where('circuit_id', $this->circuitId)->pluck('id');
-            $query->where(function ($q) use ($basketIds) {
-                $q->whereIn('previous_status', function ($sub) use ($basketIds) {
-                    $sub->select('status')->from('baskets')->whereIn('id', $basketIds);
-                });
-            });
+            $statuses = Basket::where('circuit_id', $this->circuitId)->pluck('status');
+            $query->whereIn('previous_status', $statuses);
         }
 
         return $query->get();
@@ -575,7 +542,7 @@ class WorkflowManager
         $baskets = $this->subject->baskets()->with('circuit')->get();
 
         return $baskets->groupBy('circuit_id')->map(function ($circuitBaskets) {
-            $latest = $circuitBaskets->last();
+            $latest = $circuitBaskets->sortByDesc('pivot.created_at')->first();
 
             return [
                 'circuit' => $latest->circuit,
@@ -631,11 +598,6 @@ class WorkflowManager
     /**
      * Import a circuit from a JSON file exported via the admin panel.
      *
-     * Intended for seeders and artisan commands — no HTTP request needed.
-     * Uses a transaction to ensure consistency; rolls back on any failure.
-     *
-     *     Workflow::importFromJson(database_path('seeders/workflow-invoices.json'));
-     *
      * @param  string  $path  Absolute path to the exported JSON file
      * @return Circuit The newly created circuit with all relations loaded
      *
@@ -648,7 +610,7 @@ class WorkflowManager
             throw new \InvalidArgumentException("File not found: {$path}");
         }
 
-        $data = json_decode(file_get_contents($path), true);
+        $data = json_decode(file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
 
         if (! is_array($data) || ($data['_format'] ?? null) !== 'laravel-workflow/v1') {
             throw new \InvalidArgumentException("Invalid workflow JSON format in: {$path}");
@@ -657,7 +619,6 @@ class WorkflowManager
         $circuit = DB::transaction(function () use ($data) {
             $circuitData = $data['circuit'];
 
-            // Create circuit quietly to skip the "created" event that auto-creates a DRAFT basket
             $circuit = new Circuit;
             $circuit->forceFill([
                 'name' => $circuitData['name'],
@@ -667,7 +628,6 @@ class WorkflowManager
             ]);
             $circuit->saveQuietly();
 
-            // Create baskets and build a ref map (old UUID → new UUID)
             $refMap = [];
             foreach ($data['baskets'] ?? [] as $basketData) {
                 $basket = $circuit->baskets()->create([
@@ -679,7 +639,6 @@ class WorkflowManager
                 $refMap[$basketData['_ref']] = $basket->id;
             }
 
-            // Create transitions using the ref map
             foreach ($data['baskets'] ?? [] as $basketData) {
                 $fromId = $refMap[$basketData['_ref']] ?? null;
                 if (! $fromId) {
@@ -694,12 +653,11 @@ class WorkflowManager
 
                     Basket::query()->find($fromId)->next()->attach($toId, [
                         'label' => $trans['label'] ?? null,
-                        'actions' => json_encode($trans['actions'] ?? []),
+                        'actions' => json_encode($trans['actions'] ?? [], JSON_THROW_ON_ERROR),
                     ]);
                 }
             }
 
-            // Create messages
             foreach ($data['messages'] ?? [] as $msgData) {
                 $circuit->messages()->create([
                     'subject' => $msgData['subject'],

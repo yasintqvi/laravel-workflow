@@ -58,16 +58,14 @@ trait Workflowable
      */
     public function currentStatus(string|Circuit|null $circuit = null): ?Basket
     {
+        $query = $this->baskets()->orderByPivot('created_at', 'desc');
+
         if ($circuit) {
             $circuitId = $circuit instanceof Circuit ? $circuit->id : $circuit;
-
-            return $this->baskets()
-                ->where('circuit_id', $circuitId)
-                ->orderByPivot('created_at', 'desc')
-                ->first();
+            $query->where('circuit_id', $circuitId);
         }
 
-        return $this->baskets->last();
+        return $query->first();
     }
 
     /** Scope: models in a specific basket */

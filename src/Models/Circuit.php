@@ -2,10 +2,10 @@
 
 namespace Maestrodimateo\Workflow\Models;
 
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Maestrodimateo\Workflow\Traits\HasRoles;
 use Override;
 
 /**
@@ -21,7 +21,7 @@ use Override;
  */
 class Circuit extends Model
 {
-    use HasUuids;
+    use HasRoles, HasUuids;
 
     protected $fillable = [
         'name',
@@ -60,31 +60,4 @@ class Circuit extends Model
         return $this->hasMany(Message::class);
     }
 
-    /**
-     * Scope: circuits accessibles pour un rôle donné.
-     */
-    public function scopeForRole(Builder $query, string $role): Builder
-    {
-        return $query->whereJsonContains('roles', $role);
-    }
-
-    /**
-     * Scope: circuits accessibles pour au moins un des rôles donnés.
-     */
-    public function scopeForRoles(Builder $query, array $roles): Builder
-    {
-        return $query->where(function (Builder $q) use ($roles) {
-            foreach ($roles as $role) {
-                $q->orWhereJsonContains('roles', $role);
-            }
-        });
-    }
-
-    /**
-     * Vérifie si un rôle a accès à ce circuit.
-     */
-    public function hasRole(string $role): bool
-    {
-        return in_array($role, $this->roles ?? [], true);
-    }
 }
