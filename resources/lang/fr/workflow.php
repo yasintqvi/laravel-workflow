@@ -38,6 +38,7 @@ return [
             'subject' => 'Objet',
             'content' => 'Contenu',
             'subject_placeholder' => 'Objet du message',
+            'content_placeholder' => 'Rédigez le contenu du message...',
             'variables' => 'Variables disponibles',
             'click_to_insert' => 'Cliquez pour insérer dans le contenu :',
         ],
@@ -117,10 +118,10 @@ return [
     ],
     
     'actions' => [
-        'log' => 'Journalisation',
-        'require_document' => 'Exiger des documents',
-        'send_email' => 'Envoyer un email',
-        'webhook' => 'Appeler webhook',
+        'log' => 'Log transition',
+        'require_document' => 'Require documents',
+        'send_email' => 'Send email',
+        'webhook' => 'Call webhook',
     ],
     
     'notifications' => [
@@ -141,6 +142,10 @@ return [
         'link_exists' => 'Lien déjà existant',
         'content_required' => 'Le contenu est obligatoire',
         'messages_panel_empty' => 'Aucun message — les messages sont utilisables dans les actions des transitions.',
+        'confirm_delete_circuit' => 'Supprimer ce circuit ?',
+        'confirm_delete_basket' => 'Supprimer',
+        'confirm_delete_message' => 'Supprimer ?',
+        'server_error' => 'Erreur serveur',
     ],
     
     'exceptions' => [

@@ -38,6 +38,7 @@ return [
             'subject' => 'Subject',
             'content' => 'Content',
             'subject_placeholder' => 'Message subject',
+            'content_placeholder' => 'Write message content...',
             'variables' => 'Available variables',
             'click_to_insert' => 'Click to insert into content:',
         ],
@@ -141,6 +142,10 @@ return [
         'link_exists' => 'Link already exists',
         'content_required' => 'Content is required',
         'messages_panel_empty' => 'No messages — messages can be used in transition actions.',
+        'confirm_delete_circuit' => 'Delete this circuit?',
+        'confirm_delete_basket' => 'Delete',
+        'confirm_delete_message' => 'Delete?',
+        'server_error' => 'Server error',
     ],
     
     'exceptions' => [
